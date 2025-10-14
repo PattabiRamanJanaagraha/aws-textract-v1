@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AWS Textract - PDF Table Extractor</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <style>
+    body {
+      background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+    .card {
+      max-width: 700px;
+      margin: auto;
+      border-radius: 12px;
+      box-shadow: 0 6px 15px rgba(0,0,0,0.1);
+    }
+    .progress {
+      height: 25px;
+      border-radius: 8px;
+    }
+    .file-item {
+      padding: 10px 15px;
+      background: #f1f3f5;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      border-left: 4px solid #0d6efd;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .status-success {
+      color: #198754;
+      font-weight: bold;
+    }
+    .status-failed {
+      color: #dc3545;
+      font-weight: bold;
+    }
+    /* Drag & Drop zone */
+    .drop-zone {
+      border: 2px dashed #0d6efd;
+      border-radius: 8px;
+      padding: 25px;
+      text-align: center;
+      color: #6c757d;
+      cursor: pointer;
+      background: #f8f9fa;
+      transition: background 0.3s ease, color 0.3s ease;
+    }
+    .drop-zone.dragover {
+      background: #e3f2fd;
+      color: #0d6efd;
+    }
+  </style>
+</head>
+<body class="py-5">
+
+  <div class="card p-4">
+    <h2 class="mb-3 text-primary text-center"> PDF Table Extractor</h2>
+    <p class="text-muted text-center mb-4">Extract tables from PDFs into Excel using AWS Textract</p>
+
+    <form id="uploadForm" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="fileInput" class="form-label">Choose or Drag & Drop PDF files:</label>
+        <input class="form-control mb-2" id="fileInput" type="file" name="files[]" multiple accept="application/pdf">
+        <div id="dropZone" class="drop-zone"> Drag & Drop PDF files here (or click above)</div>
+      </div>
+
+      <div id="filePreview" class="mb-3"></div>
+
+      <button type="submit" class="btn btn-primary w-100">
+        DIGITIZE ALL 
+      </button>
+    </form>
+
+    <hr class="my-4">
+    <h5 class="text-secondary">Progress</h5>
+    <div id="progressSection"></div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const filePreview = document.getElementById("filePreview");
+    const dropZone = document.getElementById("dropZone");
+
+    let selectedFiles = [];
+
+    //  Update preview
+    function updateFilePreview() {
+      filePreview.innerHTML = "";
+      selectedFiles.forEach((file, index) => {
+        const div = document.createElement("div");
+        div.className = "file-item";
+        div.innerHTML = `
+          <div>
+            <strong>${file.name}</strong>
+            <span class="text-muted">(${(file.size/1024/1024).toFixed(2)} MB)</span>
+          </div>
+          <button type="button" class="btn btn-outline-primary btn-sm extract-btn" data-index="${index}">
+            DIGITIZE Only This
+          </button>
+        `;
+        filePreview.appendChild(div);
+      });
+    }
+
+    // Handle file input selection
+    fileInput.addEventListener("change", function () {
+      selectedFiles = selectedFiles.concat(Array.from(this.files));
+      updateFilePreview();
+    });
+
+    // Drag & Drop
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("dragover");
+    });
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      const files = Array.from(e.dataTransfer.files).filter(f => f.type === "application/pdf");
+      selectedFiles = selectedFiles.concat(files);
+      updateFilePreview();
+    });
+
+    //  Extract single file
+    document.addEventListener("click", function (e) {
+      if (e.target.classList.contains("extract-btn")) {
+        const index = e.target.getAttribute("data-index");
+        extractSingleFile(index);
+      }
+    });
+
+    function extractSingleFile(index) {
+      const singleFormData = new FormData();
+      singleFormData.append("files[]", selectedFiles[index]);
+      fetch("/upload", { method: "POST", body: singleFormData })
+        .then(res => res.json())
+        .then(data => {
+          startProgressTracking(data.files);
+        });
+    }
+
+    //  Upload all files
+    document.getElementById("uploadForm").onsubmit = function (e) {
+      e.preventDefault();
+      const formData = new FormData();
+      selectedFiles.forEach(f => formData.append("files[]", f));
+      fetch("/upload", { method: "POST", body: formData })
+        .then(res => res.json())
+        .then(data => {
+          startProgressTracking(data.files);
+        });
+    };
+
+    //  Progress tracking
+    function startProgressTracking(files) {
+      files.forEach(filename => {
+        const progressContainer = document.createElement('div');
+        progressContainer.classList.add("mb-4");
+        progressContainer.innerHTML = `
+          <div class="fw-bold mb-1 text-secondary">${filename}</div>
+          <div class="progress mb-1">
+            <div id="bar-${filename}" class="progress-bar bg-success" role="progressbar" style="width: 0%">0%</div>
+          </div>
+          <small id="status-${filename}" class="text-muted">Starting...</small>
+        `;
+        document.getElementById("progressSection").appendChild(progressContainer);
+
+        const interval = setInterval(() => {
+          fetch(`/progress/${filename}`)
+            .then(res => res.json())
+            .then(p => {
+              const bar = document.getElementById(`bar-${filename}`);
+              const status = document.getElementById(`status-${filename}`);
+              if (p.percent !== undefined) {
+                bar.style.width = p.percent + "%";
+                bar.innerText = p.percent + "%";
+              }
+              if (p.status) {
+                status.innerText = p.status;
+                if (p.status.includes("Done")) status.className = "status-success";
+                if (p.status.includes("Failed")) status.className = "status-failed";
+              }
+              if (p.percent === 100) {
+                clearInterval(interval);
+                if (p.status.includes("Done")) {
+                  status.innerHTML += ` <a href="/download/${filename.replace('.pdf','.xlsx')}" class="btn btn-outline-success btn-sm ms-2">⬇ Download Excel</a>`;
+                }
+              }
+            });
+        }, 3000);
+      });
+    }
+  </script>
+
+</body>
+</html>
