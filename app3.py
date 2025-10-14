@@ -9,7 +9,7 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'output'
 
 # AWS setup
-s3_bucket = 'textract-scanned-pdf-cf'
+s3_bucket = 'replace with bucket name'
 textract = boto3.client('textract')
 s3 = boto3.client('s3')
 
