@@ -1,7 +1,6 @@
 from flask import Flask, request, render_template, send_file, jsonify
 import boto3, os, time, threading
 from openpyxl import Workbook
-from openpyxl.styles import Font
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -32,19 +31,14 @@ def upload():
         local_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(local_path)
 
-        # Upload to S3
         s3.upload_file(local_path, s3_bucket, filename)
         file_names.append(filename)
 
-        # Track progress per file
         progress[filename] = {"status": "Queued", "percent": 0}
-
-        # Start Textract in background
         thread = threading.Thread(target=process_file, args=(filename,))
         thread.start()
 
     return jsonify({"files": file_names})
-
 
 @app.route('/progress/<filename>')
 def get_progress(filename):
@@ -54,7 +48,6 @@ def get_progress(filename):
 def download(filename):
     file_path = os.path.join(app.config['OUTPUT_FOLDER'], filename)
     return send_file(file_path, as_attachment=True)
-
 
 def process_file(filename):
     progress[filename]['status'] = 'Uploading to Textract...'
@@ -78,11 +71,11 @@ def process_file(filename):
         time.sleep(4)
 
     if status != 'SUCCEEDED':
-        progress[filename]['status'] = ' Failed'
+        progress[filename]['status'] = 'Failed'
         progress[filename]['percent'] = 100
         return
 
-    # Collect all blocks
+    # Gather all blocks
     blocks = []
     next_token = None
     while True:
@@ -93,54 +86,47 @@ def process_file(filename):
         if not next_token:
             break
 
-    # Map & organize
     block_map = {b['Id']: b for b in blocks}
     table_blocks = [b for b in blocks if b['BlockType'] == 'TABLE']
-    tables_by_page = {}
-    for table in table_blocks:
-        page = table.get('Page', 1)
-        tables_by_page.setdefault(page, []).append(table)
 
-    # Write to Excel
+    # Single Excel sheet setup
     wb = Workbook()
-    wb.remove(wb.active)
+    ws = wb.active
+    ws.title = 'All_Pages'
+    current_row = 1
 
-    for page_num in sorted(tables_by_page.keys()):
-        ws = wb.create_sheet(title=f"Page_{page_num}")
-        current_row_offset = 1
-        for table in tables_by_page[page_num]:
-            cell_blocks = []
-            if 'Relationships' in table:
-                for rel in table['Relationships']:
+    for table in table_blocks:
+        cell_blocks = []
+        if 'Relationships' in table:
+            for rel in table['Relationships']:
+                if rel['Type'] == 'CHILD':
+                    for child_id in rel['Ids']:
+                        child = block_map[child_id]
+                        if child['BlockType'] == 'CELL':
+                            cell_blocks.append(child)
+
+        for cell in cell_blocks:
+            row = cell['RowIndex'] + current_row
+            col = cell['ColumnIndex']
+            text = ''
+            if 'Relationships' in cell:
+                for rel in cell['Relationships']:
                     if rel['Type'] == 'CHILD':
-                        for child_id in rel['Ids']:
-                            child = block_map[child_id]
-                            if child['BlockType'] == 'CELL':
-                                cell_blocks.append(child)
+                        text = ' '.join([
+                            block_map[child_id]['Text']
+                            for child_id in rel['Ids']
+                            if block_map[child_id]['BlockType'] == 'WORD'
+                        ])
+            ws.cell(row=row, column=col, value=text)
 
-            for cell in cell_blocks:
-                row = cell['RowIndex'] + current_row_offset
-                col = cell['ColumnIndex']
-                text = ''
-                if 'Relationships' in cell:
-                    for rel in cell['Relationships']:
-                        if rel['Type'] == 'CHILD':
-                            text = ' '.join([
-                                block_map[child_id]['Text']
-                                for child_id in rel['Ids']
-                                if block_map[child_id]['BlockType'] == 'WORD'
-                            ])
-                ws.cell(row=row, column=col, value=text)
-
-            current_row_offset += max([c['RowIndex'] for c in cell_blocks], default=0) + 3
+        current_row += max([c['RowIndex'] for c in cell_blocks], default=0) + 3
 
     output_path = os.path.join(app.config['OUTPUT_FOLDER'], filename.replace('.pdf', '.xlsx'))
     wb.save(output_path)
 
     end_time = time.time()
-    progress[filename]['status'] = f" Done in {round(end_time - start_time)}s"
+    progress[filename]['status'] = f"Done in {round(end_time - start_time)}s"
     progress[filename]['percent'] = 100
-
 
 if __name__ == '__main__':
     app.run(debug=True)
